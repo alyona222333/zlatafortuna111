@@ -1,0 +1,65 @@
+import { createClient } from '@/lib/supabase/server'
+import { notFound, redirect } from 'next/navigation'
+import { Header } from '@/components/layout/header'
+import { getTranslations } from 'next-intl/server'
+import { InventoryDetailView } from './inventory-detail-view'
+import Link from 'next/link'
+import { ChevronLeft } from 'lucide-react'
+import { getAuthUser } from '@/lib/auth-user'
+import { getBusinessForOwner } from '@/lib/business'
+
+export default async function InventoryItemPage(props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
+  const supabase = await createClient()
+  const t = await getTranslations('inventoryDetail')
+  const user = await getAuthUser()
+
+  const business = await getBusinessForOwner(user!.id)
+  if (!business) redirect('/onboarding')
+
+  const { data: item } = await (supabase
+    .from('inventory_items')
+    .select('id, name, sku, barcode, category, unit, quantity, low_stock_threshold, cost_price, sell_price, dropship_price, description, long_description, product_url, image_url, site_regular_price, site_sale_price, site_short_description, site_attributes, supplier_name, supplier_phone, supplier_price, supplier_retail_price, created_at, updated_at')
+    .eq('id', params.id)
+    .eq('business_id', business.id)
+    .maybeSingle() as any)
+
+  if (!item) notFound()
+
+  const [{ data: movements }, { data: categoryRows }] = await Promise.all([
+    supabase
+      .from('inventory_movements')
+      .select('id, type, quantity, note, created_at')
+      .eq('item_id', item.id)
+      .order('created_at', { ascending: false })
+      .limit(50),
+    supabase
+      .from('inventory_items')
+      .select('category')
+      .eq('business_id', business.id)
+      .not('category', 'is', null),
+  ])
+
+  const categories = [...new Set((categoryRows ?? []).map((r) => r.category as string))].sort()
+
+  return (
+    <>
+      <Header
+        title={item.name}
+        actions={
+          <Link href="/inventory" className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
+            <ChevronLeft className="w-4 h-4" />{t('backToInventory')}
+          </Link>
+        }
+      />
+      <InventoryDetailView
+        item={item}
+        movements={(movements ?? []) as any}
+        currency={business.currency}
+        timezone={business.timezone}
+        businessId={business.id}
+        categories={categories}
+      />
+    </>
+  )
+}
