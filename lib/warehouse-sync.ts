@@ -43,7 +43,6 @@ import {
 } from './supplier-feeds'
 
 const CHUNK = 500
-const FEED_WRITE_CHUNK = 2000
 
 export interface FeedSyncReport {
   feed_id: string
@@ -87,9 +86,27 @@ interface FeedRow {
   default_markup_percent: number | null
 }
 
-async function chunked<T>(rows: T[], fn: (slice: T[]) => Promise<void>, size = CHUNK) {
-  for (let i = 0; i < rows.length; i += size) {
-    await fn(rows.slice(i, i + size))
+/**
+ * Було послідовним `for` з `await` всередині — для фіда на 70к+ офферів
+ * (Luxyart/«Текстиль») це ~140 послідовних запитів у Supabase поспіль,
+ * що впритул чи з запасом вибиває ліміт часу серверної функції на Netlify
+ * ще ДО того, як `fetchFeedIntoCache` встигне дописати last_synced_at.
+ * Функцію просто вбиває мідсинку — тому в UI назавжди «У файлі: 0» і
+ * «Оновлено: —»: спроба синхронізації навіть не долітає до кінця, щоб
+ * записати помилку.
+ *
+ * Виправлення: гнати чанки пачками паралельно (PARALLEL штук одночасно),
+ * а не по одному — той самий обсяг запитів, але за набагато менший
+ * астрономічний час.
+ */
+const PARALLEL = 6
+
+async function chunked<T>(rows: T[], fn: (slice: T[]) => Promise<void>) {
+  const slices: T[][] = []
+  for (let i = 0; i < rows.length; i += CHUNK) slices.push(rows.slice(i, i + CHUNK))
+
+  for (let i = 0; i < slices.length; i += PARALLEL) {
+    await Promise.all(slices.slice(i, i + PARALLEL).map(fn))
   }
 }
 
@@ -173,7 +190,7 @@ export async function fetchFeedIntoCache(
         .from('supplier_offers')
         .upsert(slice as never, { onConflict: 'feed_id,offer_id' })
       if (error) throw new Error(error.message)
-    }, FEED_WRITE_CHUNK)
+    })
 
     // Позиції, яких у новому вивантаженні вже немає, постачальник зняв.
     await supabase.from('supplier_offers').delete().eq('feed_id', f.id).lt('fetched_at', startedAt)
@@ -394,32 +411,14 @@ export async function matchWarehouseAgainstOffers(
     })
   }
 
-  // Статистика должна считаться отдельно для каждого поставщика. Нельзя
-  // использовать общий matcher: если один SKU есть у Domino и Monostor,
-  // глобальная карта SKU оставит только одного из них и занизит оба отчёта.
   const perFeed = new Map<string, number>()
-  const perFeedOffers = new Map<string, number>()
-  const siteSkuKeys = new Set(items.map((item) => normArticle(item.sku)).filter(Boolean))
-  const siteBarcodeKeys = new Set(items.map((item) => item.barcode?.trim()).filter(Boolean))
-  for (const feed of feeds) {
-    const feedOffers = offers.filter((offer) => offer.feed_id === feed.id)
-    const feedMatch = matchItemsToOffers(items, feedOffers)
-    perFeed.set(feed.id, feedMatch.matches.length)
-    perFeedOffers.set(feed.id, feedOffers.filter((offer) => {
-      const sku = normArticle(offer.vendor_code)
-      const barcode = offer.barcode?.trim()
-      return (!!sku && siteSkuKeys.has(sku)) || (!!barcode && siteBarcodeKeys.has(barcode))
-    }).length)
-  }
+  for (const m of matches) perFeed.set(m.offer.feed_id, (perFeed.get(m.offer.feed_id) ?? 0) + 1)
   for (const feed of feeds) {
     // Matched — точное число оферов этого фида, сопоставленных с товарами
     // каталога. Даже ноль нужно записать, иначе на экране остаётся старое
     // значение после предыдущей синхронизации.
     const count = perFeed.get(feed.id) ?? 0
-    await supabase.from('supplier_feeds').update({
-      last_matched_count: count,
-      last_matched_offers_count: perFeedOffers.get(feed.id) ?? 0,
-    } as never).eq('id', feed.id)
+    await supabase.from('supplier_feeds').update({ last_matched_count: count } as never).eq('id', feed.id)
   }
 
   return {

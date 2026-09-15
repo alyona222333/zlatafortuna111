@@ -70,6 +70,13 @@ export function normArticle(value: string | null | undefined): string | null {
     out += idx >= 0 ? LAT[idx] : ch
   }
   s = out.replace(/[^A-Z0-9]/g, '')
+  // Чисто цифровий артикул: прибираємо провідні нулі. Сайт (текстове
+  // поле в WooCommerce) зберігає їх буквально ("00926"), а вивантаження
+  // постачальника (частіше з Excel/1С) їх звично губить ("926") —
+  // без цього кроку така пара ніколи не збіжиться.
+  if (s.length && /^[0-9]+$/.test(s)) {
+    s = s.replace(/^0+(?=\d)/, '')
+  }
   return s.length ? s : null
 }
 
