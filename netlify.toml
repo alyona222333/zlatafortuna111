@@ -1,0 +1,8 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# Netlify's official Next.js adapter is required for App Router routes,
+# middleware/proxy, server actions, and Supabase auth callbacks.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

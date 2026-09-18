@@ -1,0 +1,2 @@
+-- This migration version already exists in the remote database.
+-- Kept locally so Supabase CLI can reconcile migration history without repair.
